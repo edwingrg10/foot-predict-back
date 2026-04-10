@@ -58,15 +58,19 @@ def _serialize_match(match: Match, db: Session) -> dict:
     return out
 
 
+def _parse_json(raw) -> any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 def _serialize_prediction(pred: Prediction) -> dict:
     if not pred:
         return None
-    value_bets = []
-    if pred.value_bets:
-        try:
-            value_bets = json.loads(pred.value_bets)
-        except Exception:
-            pass
+    value_bets = _parse_json(pred.value_bets) or []
     return {
         "prob_home_win":          pred.prob_home_win,
         "prob_draw":              pred.prob_draw,
@@ -94,7 +98,21 @@ def _serialize_prediction(pred: Prediction) -> dict:
         "confidence_score":       pred.confidence_score,
         "risk_level":             pred.risk_level,
         "value_bets":             value_bets,
+        "match_summary":          pred.match_summary or "",
+        "smart_bet":              _parse_json(pred.smart_bet),
         "model_version":          pred.model_version,
+        # Evaluación
+        "actual_outcome":         pred.actual_outcome,
+        "actual_goals":           pred.actual_goals,
+        "actual_corners":         pred.actual_corners,
+        "outcome_correct":        pred.outcome_correct,
+        "over25_correct":         pred.over25_correct,
+        "btts_correct":           pred.btts_correct,
+        "corners_correct":        pred.corners_correct,
+        "cards_correct":          pred.cards_correct,
+        "smart_bet_correct":      pred.smart_bet_correct,
+        "brier_1x2":              pred.brier_1x2,
+        "evaluated_at":           pred.evaluated_at.strftime("%Y-%m-%dT%H:%M:%SZ") if pred.evaluated_at else None,
     }
 
 
@@ -121,7 +139,11 @@ def _get_and_predict(db: Session, matches: list[Match]) -> list[Match]:
     if not models_exist():
         return matches
     for m in matches:
-        if not m.prediction and m.status == MatchStatus.SCHEDULED:
+        needs_predict = (
+            not m.prediction or
+            (m.status == MatchStatus.SCHEDULED and not m.prediction.match_summary)
+        )
+        if needs_predict:
             try:
                 predict_and_save(db, m)
                 db.refresh(m)
@@ -279,3 +301,63 @@ async def predict_all(db: Session = Depends(get_db)):
     from ..ml2.predictor import predict_all_upcoming
     done = predict_all_upcoming(db)
     return {"ok": True, "predicted": done}
+
+
+@router.get("/results", tags=["matches"])
+async def get_results(
+    day: str = Query("today", description="today | yesterday"),
+    db: Session = Depends(get_db),
+):
+    """Partidos terminados de hoy o ayer con evaluación de predicciones."""
+    cot_today = datetime.now(COT).date()
+    d = cot_today if day == "today" else cot_today - timedelta(days=1)
+    dt      = datetime(d.year, d.month, d.day, 5, 0, 0)
+    next_dt = dt + timedelta(days=1)
+
+    matches = (
+        db.query(Match)
+        .filter(
+            Match.match_date >= dt,
+            Match.match_date < next_dt,
+            Match.status == MatchStatus.FINISHED,
+        )
+        .order_by(Match.match_date)
+        .all()
+    )
+    return {"groups": _group_by_league(matches, db), "total": len(matches)}
+
+
+@router.post("/evaluate", tags=["ml"])
+async def evaluate_predictions(db: Session = Depends(get_db)):
+    """
+    Evalúa predicciones de partidos ya terminados.
+    Compara la predicción con el resultado real y calcula métricas de acierto.
+    """
+    from ..ml2.evaluator import evaluate_finished_matches
+    result = evaluate_finished_matches(db)
+    return {"ok": True, **result}
+
+
+@router.get("/model-stats", tags=["ml"])
+async def model_stats(db: Session = Depends(get_db)):
+    """
+    Retorna estadísticas de rendimiento del modelo:
+    accuracy por mercado, calibración de probabilidades, desglose por liga.
+    """
+    from ..ml2.evaluator import get_model_stats
+    return get_model_stats(db)
+
+
+@router.post("/retrain", tags=["ml"])
+async def retrain_models(db: Session = Depends(get_db)):
+    """
+    Evalúa partidos terminados y reentrena los modelos con el historial acumulado.
+    Ejecutar después de que hayan pasado varios días con partidos nuevos.
+    """
+    from ..ml2.evaluator import evaluate_finished_matches
+    from ..ml2.trainer import train_all
+    eval_result = evaluate_finished_matches(db)
+    train_result = train_all(db)
+    if not train_result:
+        return {"ok": False, "message": "Dataset insuficiente para reentrenar.", **eval_result}
+    return {"ok": True, **eval_result, "models_trained": train_result}

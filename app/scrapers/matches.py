@@ -179,6 +179,16 @@ def scrape_daily(db: Session, date_str: str) -> int:
 
     db.commit()
     log.info(f"[Matches] {date_str}: {count} partidos procesados")
+
+    # Auto-evaluar predicciones de partidos terminados en este scrape
+    try:
+        from ..ml2.evaluator import evaluate_finished_matches
+        eval_result = evaluate_finished_matches(db)
+        if eval_result["evaluated"]:
+            log.info(f"[Evaluator] Auto-evaluación: {eval_result['evaluated']} predicciones evaluadas")
+    except Exception as e:
+        log.warning(f"[Evaluator] Error en auto-evaluación: {e}")
+
     return count
 
 

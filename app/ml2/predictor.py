@@ -76,6 +76,10 @@ class MatchPrediction:
     value_bets:       list[dict] = field(default_factory=list)
     analysis_notes:   list[str]  = field(default_factory=list)
 
+    # Resumen y apuesta recomendada
+    match_summary: str       = ""
+    smart_bet:     dict      = field(default_factory=dict)
+
     # Modelo usado
     model_version: str = "2.0-xgb"
 
@@ -211,6 +215,12 @@ def predict_match(db: Session, match: Match) -> Optional[MatchPrediction]:
     # ── Value bets ───────────────────────────────────────────────────────────
     pred.value_bets = _find_value_bets(pred)
 
+    # ── Resumen narrativo y apuesta recomendada ───────────────────────────────
+    home_name = match.home_team.name if match.home_team else "Local"
+    away_name = match.away_team.name if match.away_team else "Visitante"
+    pred.match_summary = _build_match_summary(home_name, away_name, feats, pred)
+    pred.smart_bet     = _build_smart_bet(home_name, away_name, pred)
+
     return pred
 
 
@@ -250,6 +260,8 @@ def predict_and_save(db: Session, match: Match) -> Optional[Prediction]:
     prediction.confidence_score       = f(pred_data.confidence_score)
     prediction.risk_level             = pred_data.risk_level
     prediction.value_bets             = json.dumps(pred_data.value_bets)
+    prediction.match_summary          = pred_data.match_summary
+    prediction.smart_bet              = json.dumps(pred_data.smart_bet)
     prediction.model_version          = pred_data.model_version
 
     db.commit()
@@ -430,6 +442,219 @@ def _find_value_bets(pred: MatchPrediction) -> list[dict]:
 
     bets.sort(key=lambda x: -x["edge"])
     return bets[:6]
+
+
+def _build_match_summary(home: str, away: str, feats: np.ndarray, pred: MatchPrediction) -> str:
+    """Genera un párrafo narrativo del partido basado en las estadísticas."""
+    lines = []
+
+    # Pronóstico principal
+    if pred.prob_home_win >= pred.prob_draw and pred.prob_home_win >= pred.prob_away_win:
+        fav, fav_prob = home, pred.prob_home_win
+        fav_side = "local"
+    elif pred.prob_away_win >= pred.prob_draw:
+        fav, fav_prob = away, pred.prob_away_win
+        fav_side = "visitante"
+    else:
+        fav, fav_prob = None, pred.prob_draw
+        fav_side = "empate"
+
+    if fav_side == "empate":
+        lines.append(
+            f"El modelo apunta a un partido muy equilibrado entre {home} y {away}, "
+            f"con {pred.prob_draw*100:.0f}% de probabilidad de empate."
+        )
+    else:
+        confianza = "claramente favorito" if fav_prob > 0.60 else "ligero favorito"
+        lines.append(
+            f"{fav} es el {confianza} frente a "
+            f"{'el visitante' if fav_side=='local' else 'el local'} "
+            f"({'como local' if fav_side=='local' else 'como visitante'}), "
+            f"con {fav_prob*100:.0f}% de probabilidad de victoria."
+        )
+
+    # Forma reciente
+    hf = feats[FEAT("home_form_5")]
+    af = feats[FEAT("away_form_5")]
+    forma_parts = []
+    if hf > 10:
+        forma_parts.append(f"{home} llega en excelente racha ({hf:.0f}/15 pts)")
+    elif hf < 5:
+        forma_parts.append(f"{home} atraviesa un mal momento ({hf:.0f}/15 pts)")
+    if af > 10:
+        forma_parts.append(f"{away} también llega en gran forma ({af:.0f}/15 pts)")
+    elif af < 5:
+        forma_parts.append(f"{away} llega con bajo rendimiento reciente ({af:.0f}/15 pts)")
+    if forma_parts:
+        lines.append(". ".join(forma_parts) + ".")
+
+    # Goles esperados
+    h_xg = pred.expected_home_goals
+    a_xg = pred.expected_away_goals
+    lines.append(
+        f"Se esperan {h_xg:.1f} goles del {home} y {a_xg:.1f} del {away} "
+        f"(marcador más probable: {pred.predicted_score}). "
+        f"La probabilidad de más de 2.5 goles es del {pred.prob_over_25*100:.0f}%."
+    )
+
+    # BTTS
+    if pred.prob_btts > 0.60:
+        lines.append(f"Hay {pred.prob_btts*100:.0f}% de probabilidad de que ambos equipos anoten.")
+    elif pred.prob_no_btts > 0.60:
+        lines.append(f"Es probable ({pred.prob_no_btts*100:.0f}%) que al menos uno de los equipos no anote.")
+
+    # Corners
+    total_c = pred.expected_home_corners + pred.expected_away_corners
+    lines.append(
+        f"En corners se esperan {total_c:.1f} en total "
+        f"({pred.expected_home_corners:.1f} local / {pred.expected_away_corners:.1f} visitante), "
+        f"con {pred.prob_over_95_corners*100:.0f}% de probabilidad de superar los 9.5."
+    )
+
+    # Tarjetas y árbitro
+    ref_y = feats[FEAT("referee_yellow_avg")]
+    total_cards_exp = pred.expected_home_cards + pred.expected_away_cards
+    if ref_y > 5:
+        lines.append(
+            f"El árbitro suele mostrar muchas tarjetas ({ref_y:.1f} amarillas/partido); "
+            f"se esperan unas {total_cards_exp:.1f} en este encuentro."
+        )
+    elif ref_y < 2.5:
+        lines.append(
+            f"El árbitro es bastante permisivo ({ref_y:.1f} amarillas/partido), "
+            f"por lo que se espera poco conflicto ({total_cards_exp:.1f} tarjetas estimadas)."
+        )
+    else:
+        lines.append(
+            f"Se esperan alrededor de {total_cards_exp:.1f} tarjetas amarillas en el partido."
+        )
+
+    # H2H
+    h2h_hw = feats[FEAT("h2h_home_win_rate")]
+    if h2h_hw > 0.60:
+        lines.append(f"Históricamente {home} domina el enfrentamiento directo.")
+    elif h2h_hw < 0.28:
+        lines.append(f"Históricamente {away} tiene ventaja en el enfrentamiento directo.")
+
+    return " ".join(lines)
+
+
+def _build_smart_bet(home: str, away: str, pred: MatchPrediction) -> dict:
+    """
+    Analiza todos los mercados y recomienda la mejor apuesta simple o combinada
+    con probabilidad combinada ≥ 65%.
+    Picks de mercados distintos para evitar correlación.
+    """
+    from itertools import combinations
+
+    MIN_PROB = 0.65
+
+    # Todos los candidatos
+    all_picks = [
+        {"label": f"Gana {home}",           "prob": pred.prob_home_win,         "market": "1X2"},
+        {"label": "Empate",                  "prob": pred.prob_draw,             "market": "1X2"},
+        {"label": f"Gana {away}",            "prob": pred.prob_away_win,         "market": "1X2"},
+        {"label": "Más de 2.5 goles",        "prob": pred.prob_over_25,          "market": "Goles"},
+        {"label": "Menos de 2.5 goles",      "prob": pred.prob_under_25,         "market": "Goles"},
+        {"label": "Ambos anotan",            "prob": pred.prob_btts,             "market": "BTTS"},
+        {"label": "No ambos anotan",         "prob": pred.prob_no_btts,          "market": "BTTS"},
+        {"label": "Más de 9.5 corners",      "prob": pred.prob_over_95_corners,  "market": "Corners"},
+        {"label": "Menos de 9.5 corners",    "prob": pred.prob_under_95_corners, "market": "Corners"},
+        {"label": "Más de 3.5 tarjetas",     "prob": pred.prob_over_35_cards,    "market": "Tarjetas"},
+        {"label": "Menos de 3.5 tarjetas",   "prob": pred.prob_under_35_cards,   "market": "Tarjetas"},
+    ]
+
+    # Solo picks con prob razonable (≥40%)
+    candidates = sorted(
+        [p for p in all_picks if p["prob"] >= 0.40],
+        key=lambda x: -x["prob"]
+    )
+
+    # Filtrar candidatos que contradigan el marcador predicho
+    # (el score más probable define qué mercados son coherentes)
+    try:
+        s = pred.predicted_score.split("-")
+        ph, pa = int(s[0]), int(s[1])
+        pt = ph + pa
+        pred_btts = ph > 0 and pa > 0
+
+        def _consistent(pick):
+            m, lbl = pick["market"], pick["label"]
+            if m == "BTTS":
+                if "no " in lbl.lower() and pred_btts:     return False
+                if "no " not in lbl.lower() and not pred_btts: return False
+            if m == "Goles":
+                if "2.5" in lbl:
+                    over = "más" in lbl.lower()
+                    if over and pt <= 2:  return False
+                    if not over and pt > 2: return False
+                if "3.5" in lbl:
+                    over = "más" in lbl.lower()
+                    if over and pt <= 3:  return False
+                    if not over and pt > 3: return False
+            return True
+
+        candidates = [c for c in candidates if _consistent(c)]
+    except Exception:
+        pass
+
+    best: dict | None = None
+
+    def _make_bet(picks, bet_type):
+        combined = 1.0
+        for p in picks: combined *= p["prob"]
+        odds = round(1 / combined, 2)
+        return {
+            "type":          bet_type,
+            "picks":         [{"label": p["label"], "market": p["market"], "prob": round(p["prob"], 3)} for p in picks],
+            "combined_prob": round(combined, 3),
+            "estimated_odds": odds,
+        }
+
+    def _is_better(new, old):
+        """Prefiere mayor probabilidad; ante igual prob, prefiere más picks (mejores cuotas)."""
+        if old is None: return True
+        if abs(new["combined_prob"] - old["combined_prob"]) > 0.03:
+            return new["combined_prob"] > old["combined_prob"]
+        return new["estimated_odds"] > old["estimated_odds"]
+
+    # 1. Apuesta simple ≥ 65%
+    for c in candidates:
+        if c["prob"] >= MIN_PROB:
+            candidate = _make_bet([c], "Simple")
+            if _is_better(candidate, best):
+                best = candidate
+
+    # 2. Doble combinada — mercados distintos
+    for c1, c2 in combinations(candidates, 2):
+        if c1["market"] == c2["market"]:
+            continue
+        combined = c1["prob"] * c2["prob"]
+        if combined >= MIN_PROB:
+            candidate = _make_bet([c1, c2], "Combinada doble")
+            if _is_better(candidate, best):
+                best = candidate
+
+    # 3. Triple combinada — tres mercados distintos
+    for c1, c2, c3 in combinations(candidates, 3):
+        if len({c1["market"], c2["market"], c3["market"]}) < 3:
+            continue
+        combined = c1["prob"] * c2["prob"] * c3["prob"]
+        if combined >= MIN_PROB:
+            candidate = _make_bet([c1, c2, c3], "Combinada triple")
+            if _is_better(candidate, best):
+                best = candidate
+
+    if best is None:
+        # Mejor opción disponible aunque no llegue al 65%
+        if candidates:
+            best_single = candidates[0]
+            best = _make_bet([best_single], "Simple")
+            best["warning"] = f"Ninguna opción supera el 65%. Mejor disponible: {best_single['prob']*100:.0f}%"
+        else:
+            return {"type": None, "message": "Sin datos suficientes para recomendar una apuesta."}
+
+    return best
 
 
 def _fallback_prediction(db: Session, match: Match) -> Optional[MatchPrediction]:

@@ -536,6 +536,8 @@ class Prediction(Base):
     confidence_score    = Column(Float, default=0)
     risk_level          = Column(String(10), default="medium")
     value_bets          = Column(Text)              # JSON string
+    match_summary       = Column(Text)              # Resumen narrativo del partido
+    smart_bet           = Column(Text)              # JSON: apuesta recomendada (simple o combinada)
     model_version       = Column(String(20), default="2.0")
 
     # ── Evaluación post-partido ───────────────────────────────────────────────
@@ -551,6 +553,7 @@ class Prediction(Base):
     corners_correct   = Column(Boolean)        # ¿acertó corners over 9.5?
     cards_correct     = Column(Boolean)        # ¿acertó tarjetas over 3.5?
     brier_1x2         = Column(Float)          # Brier score 1X2 (0=perfecto, 2=pésimo)
+    smart_bet_correct = Column(Boolean)        # ¿la apuesta recomendada ganó?
     evaluated_at      = Column(DateTime)
 
     created_at = Column(DateTime, server_default=func.now())
