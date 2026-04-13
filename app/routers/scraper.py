@@ -175,29 +175,34 @@ async def debug_events(date_str: str):
     Diagnóstico: devuelve los primeros 5 eventos de Sofascore para una fecha
     y muestra qué campos de torneo vienen en la respuesta.
     """
+    from fastapi.concurrency import run_in_threadpool
     from ..scrapers.base import client
-    client.start()
-    try:
-        data = client.fetch(f"/sport/football/scheduled-events/{date_str}")
-        if not data or "events" not in data:
-            return {"error": "Sin datos", "raw": data}
 
-        events = data["events"][:5]
-        sample = []
-        for ev in events:
-            t = ev.get("tournament", {})
-            sample.append({
-                "match":        f"{ev.get('homeTeam',{}).get('name')} vs {ev.get('awayTeam',{}).get('name')}",
-                "status":       ev.get("status", {}).get("type"),
-                "tournament":   {
-                    "name":              t.get("name"),
-                    "uniqueTournament":  t.get("uniqueTournament"),
-                    "category_name":     t.get("category", {}).get("name"),
-                },
-            })
-        return {"total_events": len(events), "sample": sample}
-    finally:
-        client.stop()
+    def _fetch():
+        client.start()
+        try:
+            data = client.fetch(f"/sport/football/scheduled-events/{date_str}")
+            if not data or "events" not in data:
+                return {"error": "Sin datos", "raw_keys": list(data.keys()) if data else None}
+
+            events = data["events"]
+            sample = []
+            for ev in events[:10]:
+                t = ev.get("tournament", {})
+                sample.append({
+                    "match":       f"{ev.get('homeTeam',{}).get('name')} vs {ev.get('awayTeam',{}).get('name')}",
+                    "status":      ev.get("status", {}).get("type"),
+                    "tournament":  {
+                        "name":             t.get("name"),
+                        "uniqueTournament": t.get("uniqueTournament"),
+                        "category_name":    t.get("category", {}).get("name"),
+                    },
+                })
+            return {"total_events": len(events), "sample": sample}
+        finally:
+            client.stop()
+
+    return await run_in_threadpool(_fetch)
 
 
 @router.post("/details", response_model=JobResponse)
