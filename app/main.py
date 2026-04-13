@@ -53,6 +53,12 @@ app.include_router(bets.router,            prefix="/api")
 app.include_router(scraper_router.router,  prefix="/api")
 
 
+@app.get("/health", tags=["health"])
+async def health():
+    """Health check sin DB — para keep-alive y load balancers."""
+    return {"status": "ok", "version": "2.0.0"}
+
+
 @app.get("/", tags=["health"])
 async def root():
     from .database import SessionLocal

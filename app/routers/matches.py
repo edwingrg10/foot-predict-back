@@ -309,17 +309,24 @@ async def get_results(
     db: Session = Depends(get_db),
 ):
     """Partidos terminados de hoy o ayer con evaluación de predicciones."""
+    from sqlalchemy import or_
     cot_today = datetime.now(COT).date()
     d = cot_today if day == "today" else cot_today - timedelta(days=1)
     dt      = datetime(d.year, d.month, d.day, 5, 0, 0)
     next_dt = dt + timedelta(days=1)
 
+    # Incluir partidos FINISHED + partidos LIVE que ya tienen marcador
+    # (partidos que pasaron por tiempo extra / penales y el scraper no los
+    #  actualizó a FINISHED después del pitido final)
     matches = (
         db.query(Match)
         .filter(
             Match.match_date >= dt,
             Match.match_date < next_dt,
-            Match.status == MatchStatus.FINISHED,
+            or_(
+                Match.status == MatchStatus.FINISHED,
+                (Match.status == MatchStatus.LIVE) & (Match.home_score != None) & (Match.away_score != None),
+            ),
         )
         .order_by(Match.match_date)
         .all()
@@ -346,6 +353,96 @@ async def model_stats(db: Session = Depends(get_db)):
     """
     from ..ml2.evaluator import get_model_stats
     return get_model_stats(db)
+
+
+@router.get("/training-status", tags=["ml"])
+async def training_status(db: Session = Depends(get_db)):
+    """
+    Estado completo del ciclo de retroalimentación:
+    - Info de los archivos de modelo (fecha, tamaño)
+    - Embudo de datos (terminados → con stats → evaluados → pendientes)
+    - Historial de entrenamientos (training_log.json)
+    - Próximas ejecuciones del scheduler
+    """
+    import json
+    from ..ml2.trainer import MODEL_FILES, MODELS_DIR
+    from ..models import Prediction
+
+    # ── Info de modelos ────────────────────────────────────────────────────────
+    model_labels = {
+        "result_1x2":      "Resultado 1X2",
+        "over_25":         "Over 2.5",
+        "over_35":         "Over 3.5",
+        "btts":            "BTTS",
+        "corners_over_95": "Corners +9.5",
+        "cards_over_35":   "Tarjetas +3.5",
+    }
+    models_info = {}
+    for name, path in MODEL_FILES.items():
+        if path.exists():
+            stat = path.stat()
+            models_info[name] = {
+                "label":      model_labels.get(name, name),
+                "exists":     True,
+                "trained_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%dT%H:%M:%S"),
+                "size_kb":    round(stat.st_size / 1024, 1),
+            }
+        else:
+            models_info[name] = {
+                "label": model_labels.get(name, name),
+                "exists": False,
+                "trained_at": None,
+                "size_kb": 0,
+            }
+
+    # ── Embudo de datos ────────────────────────────────────────────────────────
+    finished_total      = db.query(Match).filter(Match.status == MatchStatus.FINISHED).count()
+    finished_with_stats = db.query(Match).filter(
+        Match.status == MatchStatus.FINISHED,
+        Match.stats_scraped == True,
+    ).count()
+    evaluated_preds = db.query(Prediction).filter(
+        Prediction.evaluated_at != None  # noqa: E711
+    ).count()
+    pending_eval = (
+        db.query(Prediction)
+        .join(Match, Prediction.match_id == Match.id)
+        .filter(
+            Match.status == MatchStatus.FINISHED,
+            Prediction.evaluated_at == None,  # noqa: E711
+        )
+        .count()
+    )
+
+    # ── Historial de entrenamientos ────────────────────────────────────────────
+    log_path = MODELS_DIR / "training_log.json"
+    training_history: list = []
+    if log_path.exists():
+        try:
+            with open(log_path) as f:
+                training_history = json.load(f)
+            training_history = list(reversed(training_history))[:20]
+        except Exception:
+            training_history = []
+
+    # ── Scheduler ─────────────────────────────────────────────────────────────
+    try:
+        from ..scrapers.scheduler import get_jobs
+        jobs = get_jobs()
+    except Exception:
+        jobs = []
+
+    return {
+        "models":           models_info,
+        "data_pipeline":    {
+            "finished_matches":      finished_total,
+            "finished_with_stats":   finished_with_stats,
+            "evaluated_predictions": evaluated_preds,
+            "pending_evaluation":    pending_eval,
+        },
+        "training_history": training_history,
+        "scheduler_jobs":   jobs,
+    }
 
 
 @router.post("/retrain", tags=["ml"])

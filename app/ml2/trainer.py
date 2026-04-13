@@ -186,7 +186,37 @@ def train_all(db: Session) -> dict:
         pickle.dump(FEATURE_NAMES, f)
 
     log.info(f"[Trainer] Entrenamiento completo: {list(results.keys())}")
+
+    # Guardar log de entrenamiento
+    _append_training_log(results, len(X))
+
     return results
+
+
+def _append_training_log(results: dict, total_samples: int) -> None:
+    """Agrega una entrada al historial de entrenamientos (JSON)."""
+    import json
+    from datetime import datetime
+
+    log_path = MODELS_DIR / "training_log.json"
+    history: list = []
+    if log_path.exists():
+        try:
+            with open(log_path) as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+
+    entry = {
+        "timestamp":     datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "total_samples": total_samples,
+        "models":        results,   # {model: {samples, accuracy, classes}}
+    }
+    history.append(entry)
+    history = history[-50:]        # conservar últimas 50 ejecuciones
+
+    with open(log_path, "w") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
 
 
 def load_models() -> dict:

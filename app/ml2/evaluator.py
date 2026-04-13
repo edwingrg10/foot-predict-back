@@ -205,14 +205,23 @@ def _pick_correct(market, label, outcome, total_goals, total_corners,
 
 def evaluate_finished_matches(db: Session) -> dict:
     """
-    Evalúa todos los partidos FINISHED que tienen predicción pero aún
-    no han sido evaluados. Retorna resumen de la ejecución.
+    Evalúa todos los partidos FINISHED (o LIVE con marcador final) que tienen
+    predicción pero aún no han sido evaluados. Retorna resumen de la ejecución.
+    Los partidos en LIVE con marcador son partidos que pasaron por tiempo extra
+    / penales y el scraper no los actualizó a FINISHED tras el pitido final.
     """
+    from sqlalchemy import or_
+    from ..models import Match as _Match
     pending = (
         db.query(Prediction)
-        .join(Match, Prediction.match_id == Match.id)
+        .join(_Match, Prediction.match_id == _Match.id)
         .filter(
-            Match.status == MatchStatus.FINISHED,
+            or_(
+                _Match.status == MatchStatus.FINISHED,
+                (_Match.status == MatchStatus.LIVE)
+                & (_Match.home_score != None)   # noqa: E711
+                & (_Match.away_score != None),   # noqa: E711
+            ),
             Prediction.evaluated_at == None,  # noqa: E711
         )
         .all()
