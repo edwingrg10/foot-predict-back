@@ -34,18 +34,22 @@ class SofascoreClient:
     # ── Ciclo de vida ────────────────────────────────────────────────────────
     def start(self):
         """Lanza el browser. Llamar antes de hacer requests."""
-        from playwright.sync_api import sync_playwright
-        self._pw      = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=True)
-        self._ctx     = self._browser.new_context(user_agent=UA, locale="es-ES")
-        self._page    = self._ctx.new_page()
-        # Visitar la home para obtener cookies de sesión
-        try:
-            self._page.goto("https://www.sofascore.com/", wait_until="domcontentloaded", timeout=20000)
-        except Exception:
-            pass
-        time.sleep(1)
-        log.info("[Client] Browser iniciado y sesión establecida")
+        with self._lock:
+            if self._browser is not None:
+                log.info("[Client] Browser ya iniciado, reutilizando")
+                return
+            from playwright.sync_api import sync_playwright
+            self._pw      = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(headless=True)
+            self._ctx     = self._browser.new_context(user_agent=UA, locale="es-ES")
+            self._page    = self._ctx.new_page()
+            # Visitar la home para obtener cookies de sesión
+            try:
+                self._page.goto("https://www.sofascore.com/", wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+            time.sleep(1)
+            log.info("[Client] Browser iniciado y sesión establecida")
 
     def stop(self):
         """Cierra el browser limpiamente."""

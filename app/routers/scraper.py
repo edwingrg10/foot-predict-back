@@ -11,6 +11,26 @@ from pydantic import BaseModel
 log = logging.getLogger("router.scraper")
 router = APIRouter(prefix="/scraper", tags=["scraper"])
 
+# Evita que dos jobs de scraping corran en paralelo (Playwright es single-instance)
+import threading
+_scraping_lock = threading.Lock()
+_scraping_running = False
+
+
+def _acquire_scraping() -> bool:
+    global _scraping_running
+    with _scraping_lock:
+        if _scraping_running:
+            return False
+        _scraping_running = True
+        return True
+
+
+def _release_scraping():
+    global _scraping_running
+    with _scraping_lock:
+        _scraping_running = False
+
 
 class JobResponse(BaseModel):
     ok: bool
@@ -64,9 +84,15 @@ async def trigger_init(background_tasks: BackgroundTasks):
     Primera ejecución: inicializa ligas, temporadas, standings y partidos de hoy.
     Ejecutar UNA sola vez al arrancar el sistema.
     """
+    if not _acquire_scraping():
+        return JobResponse(ok=False, message="Ya hay un scraping en curso. Espera a que termine.")
+
     def _run():
-        from ..scrapers.runner import run_init
-        run_init()
+        try:
+            from ..scrapers.runner import run_init
+            run_init()
+        finally:
+            _release_scraping()
 
     background_tasks.add_task(_run)
     return JobResponse(ok=True, message="Init scraping iniciado en background")
@@ -76,9 +102,15 @@ async def trigger_init(background_tasks: BackgroundTasks):
 @router.post("/daily", response_model=JobResponse)
 async def trigger_daily(background_tasks: BackgroundTasks):
     """Dispara el scraping diario manualmente."""
+    if not _acquire_scraping():
+        return JobResponse(ok=False, message="Ya hay un scraping en curso. Espera a que termine.")
+
     def _run():
-        from ..scrapers.runner import run_daily
-        run_daily()
+        try:
+            from ..scrapers.runner import run_daily
+            run_daily()
+        finally:
+            _release_scraping()
 
     background_tasks.add_task(_run)
     return JobResponse(ok=True, message="Daily scraping iniciado en background")
@@ -113,24 +145,61 @@ async def trigger_date(date_str: str, background_tasks: BackgroundTasks):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
         raise HTTPException(400, "Formato de fecha inválido. Usar YYYY-MM-DD")
 
+    if not _acquire_scraping():
+        return JobResponse(ok=False, message="Ya hay un scraping en curso. Espera a que termine.")
+
     def _run():
         from ..scrapers.base import client
         from ..scrapers.matches import scrape_daily
         from ..database import SessionLocal
-        client.start()
-        db = SessionLocal()
         try:
-            n = scrape_daily(db, date_str)
-            log.info(f"[Router] Scraping {date_str}: {n} partidos")
+            client.start()
+            db = SessionLocal()
+            try:
+                n = scrape_daily(db, date_str)
+                log.info(f"[Router] Scraping {date_str}: {n} partidos")
+            finally:
+                db.close()
+                client.stop()
         finally:
-            db.close()
-            client.stop()
+            _release_scraping()
 
     background_tasks.add_task(_run)
     return JobResponse(ok=True, message=f"Scraping de {date_str} iniciado en background")
 
 
 # ── Detalles de partidos pendientes ──────────────────────────────────────────
+@router.get("/debug-events/{date_str}")
+async def debug_events(date_str: str):
+    """
+    Diagnóstico: devuelve los primeros 5 eventos de Sofascore para una fecha
+    y muestra qué campos de torneo vienen en la respuesta.
+    """
+    from ..scrapers.base import client
+    client.start()
+    try:
+        data = client.fetch(f"/sport/football/scheduled-events/{date_str}")
+        if not data or "events" not in data:
+            return {"error": "Sin datos", "raw": data}
+
+        events = data["events"][:5]
+        sample = []
+        for ev in events:
+            t = ev.get("tournament", {})
+            sample.append({
+                "match":        f"{ev.get('homeTeam',{}).get('name')} vs {ev.get('awayTeam',{}).get('name')}",
+                "status":       ev.get("status", {}).get("type"),
+                "tournament":   {
+                    "name":              t.get("name"),
+                    "uniqueTournament":  t.get("uniqueTournament"),
+                    "category_name":     t.get("category", {}).get("name"),
+                },
+            })
+        return {"total_events": len(events), "sample": sample}
+    finally:
+        client.stop()
+
+
 @router.post("/details", response_model=JobResponse)
 async def trigger_details(
     background_tasks: BackgroundTasks,
