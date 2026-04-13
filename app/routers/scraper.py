@@ -179,28 +179,62 @@ async def debug_events(date_str: str):
     from ..scrapers.base import client
 
     def _fetch():
-        client.start()
-        try:
-            data = client.fetch(f"/sport/football/scheduled-events/{date_str}")
-            if not data or "events" not in data:
-                return {"error": "Sin datos", "raw_keys": list(data.keys()) if data else None}
+        from playwright.sync_api import sync_playwright
+        results = {}
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx     = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+                locale="es-ES",
+            )
+            page = ctx.new_page()
+            try:
+                page.goto("https://www.sofascore.com/", wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                pass
 
-            events = data["events"]
-            sample = []
-            for ev in events[:10]:
-                t = ev.get("tournament", {})
-                sample.append({
-                    "match":       f"{ev.get('homeTeam',{}).get('name')} vs {ev.get('awayTeam',{}).get('name')}",
-                    "status":      ev.get("status", {}).get("type"),
-                    "tournament":  {
-                        "name":             t.get("name"),
-                        "uniqueTournament": t.get("uniqueTournament"),
-                        "category_name":    t.get("category", {}).get("name"),
-                    },
-                })
-            return {"total_events": len(events), "sample": sample}
-        finally:
-            client.stop()
+            url = f"https://www.sofascore.com/api/v1/sport/football/scheduled-events/{date_str}"
+            raw = page.evaluate(f"""async () => {{
+                const r = await fetch('{url}', {{
+                    headers: {{
+                        'Accept': 'application/json',
+                        'Origin': 'https://www.sofascore.com',
+                        'Referer': 'https://www.sofascore.com/',
+                    }}
+                }});
+                const status = r.status;
+                let body = null;
+                try {{ body = await r.json(); }} catch(e) {{}}
+                return {{ status, body }};
+            }}""")
+            browser.close()
+
+        if not raw:
+            return {"error": "evaluate devolvió None"}
+
+        status = raw.get("status")
+        body   = raw.get("body") or {}
+
+        if status != 200:
+            return {"error": f"HTTP {status} de Sofascore", "status": status}
+
+        events = body.get("events", [])
+        if not events:
+            return {"status": status, "total_events": 0, "message": "Sin eventos para esta fecha"}
+
+        sample = []
+        for ev in events[:10]:
+            t = ev.get("tournament", {})
+            sample.append({
+                "match":       f"{ev.get('homeTeam',{}).get('name')} vs {ev.get('awayTeam',{}).get('name')}",
+                "ev_status":   ev.get("status", {}).get("type"),
+                "tournament":  {
+                    "name":             t.get("name"),
+                    "uniqueTournament": t.get("uniqueTournament"),
+                    "category_name":    t.get("category", {}).get("name"),
+                },
+            })
+        return {"http_status": status, "total_events": len(events), "sample": sample}
 
     return await run_in_threadpool(_fetch)
 
