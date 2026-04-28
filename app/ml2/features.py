@@ -108,6 +108,14 @@ def build_features(db: Session, match: Match) -> Optional[np.ndarray]:
     """
     v: dict[str, float] = {k: 0.0 for k in FEATURE_NAMES}
 
+    # Defaults para árbitro cuando no hay datos
+    v["referee_yellow_avg"]      = 3.5
+    v["referee_red_avg"]         = 0.3
+    v["referee_home_win_rate"]   = 0.45
+    v["referee_yellow_per_team"] = 1.75
+    v["referee_red_per_team"]    = 0.15
+    v["referee_corners_avg"]     = 9.5
+
     home_id   = match.home_team_id
     away_id   = match.away_team_id
     league_id = match.league_id

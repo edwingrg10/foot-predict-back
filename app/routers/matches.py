@@ -445,6 +445,109 @@ async def training_status(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/predictions-history", tags=["ml"])
+async def predictions_history(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=5, le=100),
+    league_id: Optional[int] = Query(None),
+    only_evaluated: bool = Query(True),
+    db: Session = Depends(get_db),
+):
+    """
+    Historial de predicciones guardadas en la DB con su comparativo real.
+    Base para el análisis de rendimiento del modelo.
+    """
+    from ..models import Prediction, Team, League as LeagueModel
+
+    q = (
+        db.query(Prediction)
+        .join(Match, Prediction.match_id == Match.id)
+    )
+    if only_evaluated:
+        q = q.filter(Prediction.evaluated_at != None)  # noqa: E711
+    if league_id:
+        q = q.filter(Match.league_id == league_id)
+
+    total = q.count()
+    preds = (
+        q.order_by(Match.match_date.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+
+    def _predicted_outcome(pred: Prediction) -> str:
+        probs = {
+            "H": pred.prob_home_win or 0,
+            "D": pred.prob_draw or 0,
+            "A": pred.prob_away_win or 0,
+        }
+        return max(probs, key=probs.get)
+
+    def _outcome_label(code: str) -> str:
+        return {"H": "Local", "D": "Empate", "A": "Visitante"}.get(code or "", "—")
+
+    import json
+    items = []
+    for pred in preds:
+        m = pred.match
+        sb = None
+        try:
+            sb = json.loads(pred.smart_bet) if pred.smart_bet else None
+        except Exception:
+            pass
+
+        items.append({
+            "prediction_id":    pred.id,
+            "match_id":         m.id,
+            "match_date":       m.match_date.strftime("%Y-%m-%dT%H:%M:%SZ") if m.match_date else None,
+            "league":           m.league.name if m.league else "",
+            "league_logo":      m.league.logo_url if m.league else None,
+            "home_team":        m.home_team.name if m.home_team else "",
+            "home_logo":        m.home_team.logo_url if m.home_team else None,
+            "away_team":        m.away_team.name if m.away_team else "",
+            "away_logo":        m.away_team.logo_url if m.away_team else None,
+            # Predicción
+            "predicted_outcome":   _predicted_outcome(pred),
+            "predicted_label":     _outcome_label(_predicted_outcome(pred)),
+            "prob_home_win":       pred.prob_home_win,
+            "prob_draw":           pred.prob_draw,
+            "prob_away_win":       pred.prob_away_win,
+            "prob_over_25":        pred.prob_over_25,
+            "prob_btts":           pred.prob_btts,
+            "prob_over_95_corners": pred.prob_over_95_corners,
+            "prob_over_35_cards":  pred.prob_over_35_cards,
+            "predicted_score":     pred.predicted_score,
+            "confidence_score":    pred.confidence_score,
+            "risk_level":          pred.risk_level,
+            "smart_bet":           sb,
+            # Real
+            "actual_outcome":      pred.actual_outcome,
+            "actual_label":        _outcome_label(pred.actual_outcome),
+            "actual_score":        f"{m.home_score}-{m.away_score}" if m.home_score is not None else None,
+            "actual_goals":        pred.actual_goals,
+            "actual_corners":      pred.actual_corners,
+            # Resultados
+            "outcome_correct":     pred.outcome_correct,
+            "over25_correct":      pred.over25_correct,
+            "btts_correct":        pred.btts_correct,
+            "corners_correct":     pred.corners_correct,
+            "cards_correct":       pred.cards_correct,
+            "smart_bet_correct":   pred.smart_bet_correct,
+            "brier_1x2":           pred.brier_1x2,
+            "evaluated_at":        pred.evaluated_at.strftime("%Y-%m-%dT%H:%M:%SZ") if pred.evaluated_at else None,
+            "created_at":          pred.created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if pred.created_at else None,
+        })
+
+    return {
+        "total":    total,
+        "page":     page,
+        "per_page": per_page,
+        "pages":    max(1, (total + per_page - 1) // per_page),
+        "items":    items,
+    }
+
+
 @router.post("/retrain", tags=["ml"])
 async def retrain_models(db: Session = Depends(get_db)):
     """

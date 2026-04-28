@@ -1,0 +1,110 @@
+[
+  {
+    "timestamp": "2026-04-22T12:52:53",
+    "total_samples": 350,
+    "models": {
+      "result_1x2": {
+        "samples": 350,
+        "accuracy": 0.5229,
+        "classes": 3
+      },
+      "over_25": {
+        "samples": 350,
+        "accuracy": 0.5457,
+        "classes": 2
+      },
+      "over_35": {
+        "samples": 350,
+        "accuracy": 0.7743,
+        "classes": 2
+      },
+      "btts": {
+        "samples": 350,
+        "accuracy": 0.54,
+        "classes": 2
+      },
+      "corners_over_95": {
+        "samples": 350,
+        "accuracy": 0.5914,
+        "classes": 2
+      },
+      "cards_over_35": {
+        "samples": 342,
+        "accuracy": 0.8597,
+        "classes": 2
+      }
+    }
+  },
+  {
+    "timestamp": "2026-04-22T13:10:44",
+    "total_samples": 650,
+    "models": {
+      "result_1x2": {
+        "samples": 650,
+        "accuracy": 0.5031,
+        "classes": 3
+      },
+      "over_25": {
+        "samples": 650,
+        "accuracy": 0.4708,
+        "classes": 2
+      },
+      "over_35": {
+        "samples": 650,
+        "accuracy": 0.7538,
+        "classes": 2
+      },
+      "btts": {
+        "samples": 650,
+        "accuracy": 0.5308,
+        "classes": 2
+      },
+      "corners_over_95": {
+        "samples": 650,
+        "accuracy": 0.5415,
+        "classes": 2
+      },
+      "cards_over_35": {
+        "samples": 631,
+        "accuracy": 0.7226,
+        "classes": 2
+      }
+    }
+  },
+  {
+    "timestamp": "2026-04-22T13:45:17",
+    "total_samples": 1029,
+    "models": {
+      "result_1x2": {
+        "samples": 1029,
+        "accuracy": 0.5276,
+        "classes": 3
+      },
+      "over_25": {
+        "samples": 1029,
+        "accuracy": 0.5112,
+        "classes": 2
+      },
+      "over_35": {
+        "samples": 1029,
+        "accuracy": 0.7357,
+        "classes": 2
+      },
+      "btts": {
+        "samples": 1029,
+        "accuracy": 0.5296,
+        "classes": 2
+      },
+      "corners_over_95": {
+        "samples": 1029,
+        "accuracy": 0.5277,
+        "classes": 2
+      },
+      "cards_over_35": {
+        "samples": 1008,
+        "accuracy": 0.6925,
+        "classes": 2
+      }
+    }
+  }
+]

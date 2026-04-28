@@ -246,9 +246,13 @@ def scrape_match_full(db: Session, match: Match) -> dict:
 def scrape_pending_matches(db: Session, limit: int = 50) -> int:
     """
     Scrape detalles de todos los partidos terminados que aún no tienen stats.
+    Usa una sesión nueva por partido para evitar que Supabase cierre la conexión
+    durante loops largos.
     """
-    pending = (
-        db.query(Match)
+    from ..database import SessionLocal
+
+    pending_ids = (
+        db.query(Match.id, Match.sofascore_id)
         .filter(
             Match.status == MatchStatus.FINISHED,
             Match.stats_scraped == False,
@@ -258,19 +262,25 @@ def scrape_pending_matches(db: Session, limit: int = 50) -> int:
         .all()
     )
 
-    log.info(f"[Details] {len(pending)} partidos pendientes de detalles")
+    log.info(f"[Details] {len(pending_ids)} partidos pendientes de detalles")
     done = 0
-    for match in pending:
+    for match_id, sofascore_id in pending_ids:
+        fresh_db = SessionLocal()
         try:
-            result = scrape_match_full(db, match)
+            match = fresh_db.query(Match).filter_by(id=match_id).first()
+            if not match:
+                continue
+            result = scrape_match_full(fresh_db, match)
             if result.get("stats") or result.get("events"):
                 done += 1
                 log.info(
-                    f"[Details] {match.sofascore_id} OK — "
+                    f"[Details] {sofascore_id} OK — "
                     f"stats={result.get('stats')}, events={result.get('events')}, "
                     f"lineups={result.get('lineups')}"
                 )
         except Exception as e:
-            log.error(f"[Details] Error en match {match.sofascore_id}: {e}")
+            log.error(f"[Details] Error en match {sofascore_id}: {e}")
+        finally:
+            fresh_db.close()
 
     return done

@@ -121,19 +121,53 @@ async def trigger_daily(background_tasks: BackgroundTasks):
 async def trigger_historical(
     background_tasks: BackgroundTasks,
     years_back: int = Query(3, ge=1, le=10),
+    retrain: bool = Query(True, description="Re-entrenar modelos al terminar"),
+    league_ids: str = Query(None, description="Sofascore IDs separados por coma, ej: 11536,11539. Vacío = todas las ligas"),
 ):
     """
-    Carga histórica de las últimas N temporadas.
-    ADVERTENCIA: puede tardar varias horas. Ejecutar solo una vez.
+    Carga histórica de las últimas N temporadas y re-entrena los modelos.
+    Puede tardar varias horas dependiendo de cuántos partidos haya que scrapear.
     """
+    if not _acquire_scraping():
+        return JobResponse(ok=False, message="Ya hay un scraping en curso. Espera a que termine.")
+
+    parsed_ids = None
+    if league_ids:
+        try:
+            parsed_ids = [int(x.strip()) for x in league_ids.split(",")]
+        except ValueError:
+            _release_scraping()
+            return JobResponse(ok=False, message="league_ids inválido. Usar números separados por coma.")
+
     def _run():
-        from ..scrapers.runner import run_historical
-        run_historical(years_back=years_back)
+        try:
+            from ..scrapers.runner import run_historical
+            from ..database import SessionLocal
+            run_historical(years_back=years_back, league_ids=parsed_ids)
+
+            if retrain:
+                log.info("[Historical] Scraping terminado — evaluando y re-entrenando modelos...")
+                db = SessionLocal()
+                try:
+                    from ..ml2.evaluator import evaluate_finished_matches
+                    from ..ml2.trainer import train_all
+                    evaluate_finished_matches(db)
+                    result = train_all(db)
+                    if result:
+                        log.info(f"[Historical] Modelos re-entrenados: {list(result.keys())}")
+                    else:
+                        log.warning("[Historical] Dataset insuficiente para re-entrenar")
+                finally:
+                    db.close()
+        finally:
+            _release_scraping()
 
     background_tasks.add_task(_run)
     return JobResponse(
         ok=True,
-        message=f"Carga histórica ({years_back} temporadas) iniciada en background"
+        message=f"Carga histórica ({years_back} temporadas) iniciada en background. "
+                f"{'Re-entrenamiento automático al terminar.' if retrain else ''} "
+                f"Monitorea el progreso en GET /scraper/status"
     )
 
 
@@ -260,3 +294,23 @@ async def trigger_details(
 
     background_tasks.add_task(_run)
     return JobResponse(ok=True, message=f"Scraping de detalles (max {limit}) iniciado en background")
+
+
+# ── Evaluación de predicciones ────────────────────────────────────────────────
+@router.post("/evaluate", response_model=JobResponse)
+async def trigger_evaluate():
+    """Evalúa ahora todas las predicciones de partidos ya terminados."""
+    from ..database import SessionLocal
+    from ..ml2.evaluator import evaluate_finished_matches
+
+    db = SessionLocal()
+    try:
+        result = evaluate_finished_matches(db)
+        evaluated = result.get("evaluated", 0)
+        skipped   = result.get("skipped", 0)
+        return JobResponse(
+            ok=True,
+            message=f"Evaluación completada: {evaluated} evaluadas, {skipped} sin datos suficientes.",
+        )
+    finally:
+        db.close()

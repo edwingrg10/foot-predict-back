@@ -225,13 +225,32 @@ def predict_match(db: Session, match: Match) -> Optional[MatchPrediction]:
 
 
 def predict_and_save(db: Session, match: Match) -> Optional[Prediction]:
-    """Predice y guarda en la tabla predictions."""
+    """Predice y guarda en la tabla predictions.
+
+    Si ya existe una predicción con probabilidades calculadas y el partido
+    ya no está en estado SCHEDULED, la predicción pre-partido se preserva
+    para que el análisis del modelo sea válido.
+    """
+    prediction = db.query(Prediction).filter_by(match_id=match.id).first()
+
+    # Preservar predicción pre-partido: si ya tiene probabilidades y el partido
+    # ya no es SCHEDULED (está LIVE, FINISHED, etc.), no sobreescribir.
+    if (
+        prediction is not None
+        and prediction.prob_home_win is not None
+        and match.status != MatchStatus.SCHEDULED
+    ):
+        log.debug(
+            f"[Predictor] Predicción pre-partido preservada para match {match.sofascore_id} "
+            f"(status={match.status.value})"
+        )
+        return prediction
+
     pred_data = predict_match(db, match)
     if not pred_data:
         return None
 
     import json
-    prediction = db.query(Prediction).filter_by(match_id=match.id).first()
     if not prediction:
         prediction = Prediction(match_id=match.id)
         db.add(prediction)
@@ -380,7 +399,7 @@ def _build_notes(feats: np.ndarray, pred: MatchPrediction) -> list[str]:
     ref_y = feats[FEAT("referee_yellow_avg")]
     if ref_y > 5:
         notes.append(f"Árbitro con historial de muchas tarjetas ({ref_y:.1f} amarillas/partido)")
-    elif ref_y < 2.5:
+    elif ref_y < 2.5 and ref_y > 0:
         notes.append(f"Árbitro permisivo ({ref_y:.1f} amarillas/partido en promedio)")
 
     # Corners
@@ -519,7 +538,7 @@ def _build_match_summary(home: str, away: str, feats: np.ndarray, pred: MatchPre
             f"El árbitro suele mostrar muchas tarjetas ({ref_y:.1f} amarillas/partido); "
             f"se esperan unas {total_cards_exp:.1f} en este encuentro."
         )
-    elif ref_y < 2.5:
+    elif ref_y < 2.5 and ref_y > 0:
         lines.append(
             f"El árbitro es bastante permisivo ({ref_y:.1f} amarillas/partido), "
             f"por lo que se espera poco conflicto ({total_cards_exp:.1f} tarjetas estimadas)."

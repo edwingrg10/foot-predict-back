@@ -19,6 +19,25 @@ from .details import scrape_pending_matches, scrape_match_full
 from .standings import scrape_all_standings, scrape_standings
 from .config import TARGET_LEAGUES
 
+
+def _season_start_year(year_str: str) -> int:
+    """Extrae el año de inicio de una temporada.
+    '25/26'→2025, '2026'→2026, '99/00'→1999, '1969/1970'→1969.
+    """
+    year_str = year_str.strip()
+    if "/" in year_str:
+        part = year_str.split("/")[0].strip()
+    else:
+        part = year_str
+    try:
+        y = int(part)
+        if y >= 100:
+            return y  # año completo: 1969, 2026, etc.
+        # Año de 2 dígitos: <=30 → 2000s, >30 → 1900s
+        return y + 2000 if y <= 30 else y + 1900
+    except ValueError:
+        return 0
+
 log = logging.getLogger("scraper.runner")
 
 
@@ -92,6 +111,32 @@ def run_daily():
             _finish_log(db, entry, error=str(e))
             log.error(f"[Runner] Error standings: {e}")
 
+        # 4. Predicciones pre-partido para todos los partidos programados
+        entry = _log_job(db, "predictions", today)
+        try:
+            from ..ml2.predictor import predict_all_upcoming, models_exist
+            if models_exist():
+                n = predict_all_upcoming(db)
+                _finish_log(db, entry, inserted=n)
+                log.info(f"[Runner] Predicciones generadas: {n}")
+            else:
+                _finish_log(db, entry, inserted=0)
+                log.warning("[Runner] Modelos no entrenados — se omiten predicciones")
+        except Exception as e:
+            _finish_log(db, entry, error=str(e))
+            log.error(f"[Runner] Error predicciones: {e}")
+
+        # 5. Evaluar predicciones de partidos ya terminados
+        entry = _log_job(db, "evaluate_predictions", today)
+        try:
+            from ..ml2.evaluator import evaluate_finished_matches
+            result = evaluate_finished_matches(db)
+            _finish_log(db, entry, inserted=result.get("evaluated", 0))
+            log.info(f"[Runner] Predicciones evaluadas: {result}")
+        except Exception as e:
+            _finish_log(db, entry, error=str(e))
+            log.error(f"[Runner] Error evaluación: {e}")
+
     finally:
         db.close()
         client.stop()
@@ -151,33 +196,40 @@ def run_init():
 
 
 # ── Carga histórica ──────────────────────────────────────────────────────────
-def run_historical(years_back: int = 3):
+def run_historical(years_back: int = 3, league_ids: list[int] | None = None):
     """
     Carga histórica de las últimas N temporadas de cada liga.
-    Esto puede tardar varias horas — ejecutar solo una vez.
+    league_ids: lista de sofascore_ids a procesar; None = todas.
     """
     log.info("=" * 60)
-    log.info(f"HISTORICAL SCRAPING START (last {years_back} seasons)")
+    log.info(f"HISTORICAL SCRAPING START (last {years_back} seasons, leagues={league_ids or 'all'})")
     log.info("=" * 60)
 
     client.start()
     db = SessionLocal()
 
     try:
-        for cfg in TARGET_LEAGUES:
+        target = [c for c in TARGET_LEAGUES if league_ids is None or c.sofascore_id in league_ids]
+        for cfg in target:
             league = db.query(League).filter_by(sofascore_id=cfg.sofascore_id).first()
             if not league:
                 log.warning(f"[Runner] Liga no encontrada: {cfg.name} — ejecuta run_init() primero")
                 continue
 
-            # Obtener temporadas no scrapeadas aún
-            seasons = (
+            # Obtener las N temporadas más recientes no scrapeadas
+            # Filtramos por año >= 2015 para evitar datos históricos muy antiguos,
+            # luego ordenamos por año de inicio descendente.
+            all_unscraped = (
                 db.query(Season)
                 .filter_by(league_id=league.id, scraped_full=False)
-                .order_by(Season.id.desc())
-                .limit(years_back)
                 .all()
             )
+            recent = sorted(
+                [s for s in all_unscraped if _season_start_year(s.year) >= 2015],
+                key=lambda s: _season_start_year(s.year),
+                reverse=True,
+            )
+            seasons = recent[:years_back]
 
             for season in seasons:
                 log.info(f"[Runner] Scraping {cfg.name} {season.year}...")
